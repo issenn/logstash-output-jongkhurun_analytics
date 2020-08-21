@@ -4,7 +4,7 @@ Gem::Specification.new do |s|
   s.licenses      = ['Apache-2.0']
   s.summary       = 'Output plugin for Jongkhurun Analytics.'
   s.description   = 'This gem is a logstash plugin required to be installed on top of the Logstash core pipeline using $LS_HOME/bin/logstash-plugin install gemname. This gem is not a stand-alone program.'
-  s.homepage      = 'TODO: Put your plugin''s website or public repo URL here.'
+  s.homepage      = 'https://gitlab.ggtoget.com/'
   s.authors       = ['issenn']
   s.email         = 'issennknight@gmail.com'
   s.require_paths = ['lib']

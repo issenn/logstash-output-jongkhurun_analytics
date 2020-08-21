@@ -1,8 +1,6 @@
 # encoding: utf-8
 require "logstash/outputs/base"
 require "logstash/namespace"
-# require "logstash/json"
-# require "uri"
 require "logstash/plugin_mixins/http_client"
 require "stud/buffer"
 require "zlib"
@@ -80,9 +78,140 @@ class LogStash::Outputs::JongkhurunAnalytics < LogStash::Outputs::Base
   end # def register
 
   public
-  def receive(event)
-    return "Event received"
+  def multi_receive(events)
+    return if events.empty?
+    @receive_count += events.length
+    events.each do |e|
+      begin
+        record = JSON.parse(e.get("message"))
+        tag = concat_tag_from_hash_filed(e)
+        if filebeat_input?(e)
+          host = e.get("[host][name]")
+          file = e.get("[log][file][path]")
+          offset = e.get("[log][offset]")
+          lib_detail = "#{host}###{file}"
+          tag = host.to_s + file.to_s if tag.nil?
+          collect_filebeat_status(lib_detail, offset) if @enable_filebeat_status_report
+        else
+          # 这里记录一个 file_input 的 lib_detail, 其他 input 为空
+          host = e.get("host")
+          path = e.get("path")
+          if !host.nil? && !path.nil?
+            lib_detail = "#{host}###{path}"
+            tag = host.to_s + path.to_s if tag.nil?
+          else
+            lib_detail = ""
+          end
+        end
+
+        record["lib"] = {
+            "$lib" => "Logstash",
+            "$lib_version" => PLUGIN_VERSION,
+            "$lib_method" => "tools",
+            "$lib_detail" => lib_detail
+        }
+
+        record["project"] = @project if @project != nil
+
+        buffer_item = @buffer_items[buffer_index(tag)]
+        buffer_item.buffer_receive(record)
+      rescue
+        @logger.error("Could not process record", :record => e.to_s)
+        @parse_error_count += 1
+      end
+    end
   end # def event
+
+  public
+  def close
+    @buffer_items.each do |buffer_item|
+      buffer_item.buffer_state[:timer].kill
+      buffer_item.buffer_flush(:final => true)
+    end
+    @report_thread.kill
+    @client.close
+    report
+  end
+
+  private
+  def buffer_index(tag)
+    tag.hash % @url.length
+  end
+
+  private
+  def concat_tag_from_hash_filed(event)
+    if !@hash_filed.nil? && !@hash_filed.empty?
+      tag = ""
+      @hash_filed.each do |filed|
+        tag << event.get(filed).to_s
+      end
+      return tag
+    end
+    nil
+  end
+
+  private
+  def filebeat_input?(event)
+    tag = event.get("[agent][type]")
+    return true if !tag.nil? && tag == "filebeat"
+    tag = event.get("[@metadata][beat]")
+    return true if !tag.nil? && tag == "filebeat"
+    false
+  end
+
+  private
+  def collect_filebeat_status(lib_detail, offset)
+    status = @recent_filebeat_status[lib_detail]
+    if status.nil?
+      status = {:receive_time => Time.now, :offset => offset}
+      @recent_filebeat_status[lib_detail] = status
+    else
+      status[:offset] = offset
+      status[:receive_time] = Time.now
+    end
+  end
+
+  private
+  def format_filebeat_report_and_clean
+    result = "\n"
+    @recent_filebeat_status.each do |k, v|
+      result << k << "=>" << v.to_s << "\n"
+    end
+    @recent_filebeat_status = {}
+    result
+  end
+
+  public
+  def report
+    url_send_count_sum = {}
+    @url.each do |url|
+      url_send_count_sum[url] = 0
+    end
+
+    @buffer_items.each do |buffer_item|
+      buffer_url_send_count = buffer_item.url_send_count
+      buffer_url_send_count.each do |url, count|
+        url_send_count_sum[url] += count
+      end
+    end
+
+    total_send_count = 0
+    url_send_count_sum.each do |url, count|
+      total_send_count += count;
+    end
+
+    speed = (total_send_count - @last_report_count) / (Time.now - @last_report_time)
+    @last_report_count = total_send_count
+    @last_report_time = Time.now
+    @logger.info("Report",
+                 :speed => speed.round(2),
+                 :receive_count => @receive_count,
+                 :send_count => total_send_count,
+                 :parse_error_count => @parse_error_count,
+                 :url_send_count => url_send_count_sum)
+    @logger.info("Filebeat status Report: #{format_filebeat_report_and_clean}") if @enable_filebeat_status_report
+  end
+
 end # class LogStash::Outputs::JongkhurunAnalytics
 
 
